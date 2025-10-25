@@ -24,13 +24,14 @@ A smart photo frame using the SparkFun ESP32-C6 Thing Plus and Waveshare 13.3" S
 
 | E-Paper Pin | ESP32-C6 GPIO | Description |
 |-------------|---------------|-------------|
-| MOSI/DIN    | GPIO 10       | Data In     |
+| MOSI/DIN    | GPIO 3        | Data In     |
 | SCK/CLK     | GPIO 9        | Clock       |
-| CS_M        | GPIO 8        | Chip Select (Master) |
+| CS_M        | GPIO 10       | Chip Select (Master) |
 | CS_S        | GPIO 5        | Chip Select (Slave)  |
 | DC          | GPIO 4        | Data/Command |
-| RST         | GPIO 3        | Reset       |
-| BUSY        | GPIO 2        | Busy Status |
+| RST         | GPIO 2        | Reset       |
+| BUSY        | GPIO 1        | Busy Status |
+| PWR         | GPIO 11       | Display Power Enable |
 | VCC         | 3.3V          | Power       |
 | GND         | GND           | Ground      |
 

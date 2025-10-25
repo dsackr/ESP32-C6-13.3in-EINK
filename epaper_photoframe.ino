@@ -31,13 +31,14 @@
 #define SD_CS       18
 
 // E-Paper Display pins (secondary SPI)
-#define EPD_MOSI    10
+#define EPD_MOSI    3
 #define EPD_SCK     9
-#define EPD_CS_M    8   // Master area chip select
+#define EPD_CS_M    10  // Master area chip select
 #define EPD_CS_S    5   // Slave area chip select
 #define EPD_DC      4   // Data/Command
-#define EPD_RST     3   // Reset
-#define EPD_BUSY    2   // Busy status
+#define EPD_RST     2   // Reset
+#define EPD_BUSY    1   // Busy status
+#define EPD_PWR     11  // Display power enable
 
 // Display specifications
 #define EPD_WIDTH   1600
@@ -116,23 +117,27 @@ private:
 public:
     void begin() {
         // Initialize pins
+        pinMode(EPD_PWR, OUTPUT);
         pinMode(EPD_CS_M, OUTPUT);
         pinMode(EPD_CS_S, OUTPUT);
         pinMode(EPD_DC, OUTPUT);
         pinMode(EPD_RST, OUTPUT);
         pinMode(EPD_BUSY, INPUT);
-        
+
+        digitalWrite(EPD_PWR, LOW);
         digitalWrite(EPD_CS_M, HIGH);
         digitalWrite(EPD_CS_S, HIGH);
-        
+
         // Initialize SPI
-        epdSPI.begin(EPD_SCK, EPD_MISO, EPD_MOSI, -1);
+        epdSPI.begin(EPD_SCK, -1, EPD_MOSI, -1);
         epdSPI.setFrequency(4000000); // 4MHz
-        
+
         Serial.println("E-Paper initialized");
     }
 
     void reset() {
+        digitalWrite(EPD_PWR, HIGH);
+        delay(10);
         digitalWrite(EPD_RST, HIGH);
         delay(20);
         digitalWrite(EPD_RST, LOW);
@@ -189,17 +194,19 @@ public:
 
     void sleep() {
         Serial.println("Putting display to sleep...");
-        
+
         sendCommand(EPD_CS_M, 0x02); // Power off
         waitUntilIdle();
         sendCommand(EPD_CS_S, 0x02);
         waitUntilIdle();
-        
+
         sendCommand(EPD_CS_M, 0x07); // Deep sleep
         sendData(EPD_CS_M, 0xA5);
         sendCommand(EPD_CS_S, 0x07);
         sendData(EPD_CS_S, 0xA5);
-        
+
+        digitalWrite(EPD_PWR, LOW);
+
         Serial.println("Display in deep sleep");
     }
 
