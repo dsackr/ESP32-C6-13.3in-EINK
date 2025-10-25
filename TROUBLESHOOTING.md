@@ -9,9 +9,9 @@ Quick diagnostic guide for common issues.
 **Symptoms**: Display shows nothing, or stays blank after commands
 
 **Checklist**:
-- [ ] Check all 9 wire connections (VCC, GND, MOSI, SCK, CS_M, CS_S, DC, RST, BUSY)
-- [ ] Verify BUSY pin is connected (GPIO 2) - this is critical!
-- [ ] Ensure both CS pins are connected (GPIO 8 and GPIO 5)
+- [ ] Check all 10 wire connections (VCC, GND, MOSI, SCK, CS_M, CS_S, DC, RST, BUSY, PWR)
+- [ ] Verify BUSY pin is connected (GPIO 1) - this is critical!
+- [ ] Ensure both CS pins are connected (GPIO 10 and GPIO 5)
 - [ ] Check 3.3V power supply can deliver 500mA
 - [ ] Verify ground connection is solid
 - [ ] Try swapping jumper wires (they can be faulty)
@@ -144,7 +144,7 @@ python convert_image.py photo.jpg photo.bin --contrast 1.5
 **Symptoms**: Left or right half of display is blank/incorrect
 
 **Checklist**:
-- [ ] Both CS pins connected (CS_M = GPIO 8, CS_S = GPIO 5)
+- [ ] Both CS pins connected (CS_M = GPIO 10, CS_S = GPIO 5)
 - [ ] Check which half is affected:
   - Left half blank → CS_M issue
   - Right half blank → CS_S issue

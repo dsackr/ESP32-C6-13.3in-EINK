@@ -17,7 +17,7 @@ This document provides detailed wiring instructions for connecting the Waveshare
     │   │    │    │    │    │    │   │    │
     │   │    │    │    │    │    │   │    │
 ┌───┴───┴────┴────┴────┴────┴────┴───┴────┴──────┐
-│  3V3 GND  10   9    8    5    4   3    2       │
+│  3V3 GND   3   9   10    5    4   2    1   11  │
 │                                                  │
 │         SparkFun ESP32-C6 Thing Plus            │
 └─────────────────────────────────────────────────┘
@@ -29,13 +29,14 @@ This document provides detailed wiring instructions for connecting the Waveshare
 |---|-------------|-------------|--------------|----------|
 | 1 | VCC         | Red         | 3V3          | Power (+3.3V) |
 | 2 | GND         | Black       | GND          | Ground |
-| 3 | DIN (MOSI)  | Orange      | GPIO 10      | Data In |
+| 3 | DIN (MOSI)  | Orange      | GPIO 3       | Data In |
 | 4 | CLK (SCK)   | Yellow      | GPIO 9       | SPI Clock |
-| 5 | CS_M        | Green       | GPIO 8       | Chip Select (Master IC) |
+| 5 | CS_M        | Green       | GPIO 10      | Chip Select (Master IC) |
 | 6 | CS_S        | Blue        | GPIO 5       | Chip Select (Slave IC) |
 | 7 | DC          | Purple      | GPIO 4       | Data/Command |
-| 8 | RST         | Gray        | GPIO 3       | Reset |
-| 9 | BUSY        | White       | GPIO 2       | Busy Status |
+| 8 | RST         | Gray        | GPIO 2       | Reset |
+| 9 | BUSY        | White       | GPIO 1       | Busy Status |
+|10 | PWR         | Pink        | GPIO 11      | Display Power Enable |
 
 *Suggested wire colors for easy identification
 
@@ -57,19 +58,19 @@ This document provides detailed wiring instructions for connecting the Waveshare
 ║   │ 3V3 ●─┼──── VCC (Red)                      │       │     ║
 ║   │ GND ●─┼──── GND (Black)                    │       │     ║
 ║   │  23 ○ │                                    │   0 ○ │     ║
-║   │  22 ○ │                                    │   1 ○ │     ║
-║   │  21 ○ │ [SD Card Slot]                     │   2 ●─┼──── BUSY (White)
-║   │  20 ○ │                                    │   3 ●─┼──── RST (Gray)
+║   │  22 ○ │                                    │   1 ●─┼──── BUSY (White)
+║   │  21 ○ │ [SD Card Slot]                     │   2 ●─┼──── RST (Gray)
+║   │  20 ○ │                                    │   3 ●─┼──── DIN (Orange)
 ║   │  19 ○ │                                    │   4 ●─┼──── DC (Purple)
 ║   │  18 ○ │                                    │   5 ●─┼──── CS_S (Blue)
 ║   │   A ○ │                                    │   6 ○ │     ║
 ║   │  15 ○ │                                    │   7 ○ │     ║
-║   │  14 ○ │                                    │   8 ●─┼──── CS_M (Green)
+║   │  14 ○ │                                    │   8 ○ │     ║
 ║   │  13 ○ │                                    │   9 ●─┼──── CLK (Yellow)
-║   │  12 ○ │                                    │  10 ●─┼──── DIN (Orange)
-║   │  11 ○ │                                    │  EN ○ │     ║
-║   │ USB ○ │                                    │ USB ○ │     ║
-║   │ BAT ○ │                                    │ BAT ○ │     ║
+║   │  12 ○ │                                    │  10 ●─┼──── CS_M (Green)
+║   │  11 ○ │                                    │  11 ●─┼──── PWR (Pink)
+║   │ USB ○ │                                    │  12 ○ │     ║
+║   │ BAT ○ │                                    │  13 ○ │     ║
 ║   └───────┘                                    └───────┘     ║
 ║                                                               ║
 ╚═══════════════════════════════════════════════════════════════╝
@@ -89,21 +90,22 @@ This document provides detailed wiring instructions for connecting the Waveshare
 
 2. **SPI Data Lines**
    ```
-   ESP32-C6 GPIO 10 → E-Paper DIN/MOSI (Orange wire)
+   ESP32-C6 GPIO 3 → E-Paper DIN/MOSI (Orange wire)
    ESP32-C6 GPIO 9  → E-Paper CLK/SCK  (Yellow wire)
    ```
 
 3. **Chip Select Pins** (Critical for dual-IC display!)
    ```
-   ESP32-C6 GPIO 8 → E-Paper CS_M (Green wire)
+   ESP32-C6 GPIO 10 → E-Paper CS_M (Green wire)
    ESP32-C6 GPIO 5 → E-Paper CS_S (Blue wire)
    ```
 
 4. **Control Signals**
    ```
    ESP32-C6 GPIO 4 → E-Paper DC   (Purple wire)
-   ESP32-C6 GPIO 3 → E-Paper RST  (Gray wire)
-   ESP32-C6 GPIO 2 → E-Paper BUSY (White wire)
+   ESP32-C6 GPIO 2 → E-Paper RST  (Gray wire)
+   ESP32-C6 GPIO 1 → E-Paper BUSY (White wire)
+   ESP32-C6 GPIO 11 → E-Paper PWR (Pink wire)
    ```
 
 ## Connection Tips
@@ -128,7 +130,7 @@ Before powering on, verify connections with multimeter:
 ```bash
 Continuity Test:
 1. ESP32 GND ←→ E-Paper GND  ✓
-2. ESP32 GPIO10 ←→ E-Paper DIN ✓
+2. ESP32 GPIO3 ←→ E-Paper DIN ✓
 3. No shorts between adjacent pins ✓
 ```
 
@@ -137,21 +139,21 @@ Continuity Test:
 ### ❌ Wrong CS Connections
 ```
 WRONG:  CS_M and CS_S connected to same pin
-RIGHT:  CS_M → GPIO 8, CS_S → GPIO 5
+RIGHT:  CS_M → GPIO 10, CS_S → GPIO 5
 ```
 The 13.3" display has TWO ICs (Master and Slave), each needs its own CS pin!
 
 ### ❌ Swapped MOSI/MISO
 ```
 WRONG:  DIN connected to MISO pin
-RIGHT:  DIN connected to MOSI (GPIO 10)
+RIGHT:  DIN connected to MOSI (GPIO 3)
 ```
 E-paper only receives data, so only MOSI is used (no MISO connection needed)
 
 ### ❌ Missing BUSY Pin
 ```
 WRONG:  BUSY pin not connected
-RIGHT:  BUSY → GPIO 2
+RIGHT:  BUSY → GPIO 1
 ```
 The BUSY pin is essential - code will hang without it!
 
@@ -190,6 +192,7 @@ If you need to use different pins (e.g., GPIO 8/9 are boot strapping pins):
 #define EPD_DC      17
 #define EPD_RST     10
 #define EPD_BUSY    0
+#define EPD_PWR     11
 ```
 
 ## Power Considerations
@@ -307,11 +310,11 @@ void setup() {
               │   E-Paper Display   │
               │    13.3" Spectra 6  │
               │                     │
-  VCC (3.3V) ─┤ VCC            BUSY├─ BUSY (GPIO 2)
-         GND ─┤ GND             RST├─ RST  (GPIO 3)
- MOSI (G10) ─┤ DIN              DC├─ DC   (GPIO 4)
+  VCC (3.3V) ─┤ VCC            BUSY├─ BUSY (GPIO 1)
+         GND ─┤ GND             RST├─ RST  (GPIO 2)
+ MOSI (G3)  ─┤ DIN              DC├─ DC   (GPIO 4)
   SCK (G9)  ─┤ CLK            CS_S├─ CS_S (GPIO 5)
- CS_M (G8)  ─┤ CS_M                │
+ CS_M (G10) ─┤ CS_M            PWR├─ PWR (GPIO 11)
               └─────────────────────┘
                       ║
               ┌───────╨─────────┐
