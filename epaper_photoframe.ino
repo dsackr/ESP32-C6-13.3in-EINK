@@ -104,9 +104,18 @@ private:
     void waitUntilIdle() {
         Serial.println("Waiting for display...");
         unsigned long startTime = millis();
-        while(digitalRead(EPD_BUSY) == LOW) {
+        int busyState = digitalRead(EPD_BUSY);
+        Serial.printf("[EPD] BUSY=%d\n", busyState);
+        unsigned long lastLog = 0;
+        while(busyState == LOW) {
             delay(10);
-            if(millis() - startTime > 30000) { // 30 second timeout
+            busyState = digitalRead(EPD_BUSY);
+            unsigned long elapsed = millis() - startTime;
+            if(elapsed - lastLog >= 1000) {
+                Serial.printf("[EPD] Still busy... BUSY=%d elapsed=%lu ms\n", busyState, elapsed);
+                lastLog = elapsed;
+            }
+            if(elapsed > 30000) { // 30 second timeout
                 Serial.println("Display timeout!");
                 break;
             }
@@ -135,6 +144,7 @@ private:
 
 public:
     void begin() {
+        Serial.println("[EPD] begin() start");
         // Initialize pins
         pinMode(EPD_PWR, OUTPUT);
         pinMode(EPD_CS_M, OUTPUT);
@@ -147,6 +157,9 @@ public:
         digitalWrite(EPD_CS_M, HIGH);
         digitalWrite(EPD_CS_S, HIGH);
 
+        Serial.printf("[EPD] BUSY pin initial state: %d\n", digitalRead(EPD_BUSY));
+        Serial.printf("[EPD] RST pin initial state: %d\n", digitalRead(EPD_RST));
+
         // Initialize SPI
         epdSPI.begin(EPD_SCK, -1, EPD_MOSI, -1);
         epdSPI.setFrequency(4000000); // 4MHz
@@ -155,6 +168,7 @@ public:
     }
 
     void reset() {
+        Serial.println("[EPD] Performing hardware reset");
         digitalWrite(EPD_PWR, HIGH);
         delay(10);
         digitalWrite(EPD_RST, HIGH);
@@ -166,13 +180,16 @@ public:
     }
 
     void init() {
+        Serial.println("[EPD] init() start");
         reset();
         waitUntilIdle();
-        
+
         // Initialize both ICs
+        Serial.println("[EPD] Initializing master IC");
         initializeIC(EPD_CS_M);
+        Serial.println("[EPD] Initializing slave IC");
         initializeIC(EPD_CS_S);
-        
+
         Serial.println("Display initialized");
     }
 
@@ -282,6 +299,7 @@ EPaperDisplay epd;
 // ==================== SD CARD FUNCTIONS ====================
 
 bool initSDCard() {
+    Serial.println("[SD] Initializing SD card interface");
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
 
@@ -294,6 +312,7 @@ bool initSDCard() {
     // Use the default FSPI bus (shared with the onboard microSD slot) at a
     // conservative clock rate. 80MHz was unreliable with the level shifter on
     // the SparkFun board and prevented the card from initialising.
+    Serial.println("[SD] Calling SD.begin()");
     if (!SD.begin(SD_CS, SPI, 20000000)) {
         Serial.println("SD Card initialization failed!");
         return false;
@@ -348,6 +367,7 @@ String listImages() {
 }
 
 bool displayImageFromSD(String filename) {
+    Serial.println("[IMG] displayImageFromSD start");
     String path = "/images/" + filename;
     File file = SD.open(path);
     
@@ -368,16 +388,18 @@ bool displayImageFromSD(String filename) {
     }
     
     // Read file into buffer
+    Serial.println("[IMG] Reading file into buffer");
     size_t bytesRead = file.read(imageBuffer, fileSize);
     file.close();
-    
+
     if(bytesRead != fileSize) {
         Serial.println("Failed to read complete image file");
         free(imageBuffer);
         return false;
     }
-    
+
     // Display image
+    Serial.println("[IMG] Sending image buffer to EPD");
     epd.displayBitmap(imageBuffer, fileSize);
     free(imageBuffer);
     
@@ -394,6 +416,7 @@ bool displayImageFromSD(String filename) {
 // ==================== WIFI FUNCTIONS ====================
 
 void setupAccessPoint() {
+    Serial.println("[WIFI] setupAccessPoint() start");
     Serial.println("Setting up Access Point...");
     
     WiFi.mode(WIFI_AP);
@@ -419,6 +442,7 @@ void setupAccessPoint() {
 }
 
 bool connectToWiFi(String ssid, String password, int timeout_s = 20) {
+    Serial.printf("[WIFI] connectToWiFi('%s')\n", ssid.c_str());
     Serial.println("Connecting to WiFi: " + ssid);
     
     WiFi.mode(WIFI_STA);
@@ -444,6 +468,7 @@ bool connectToWiFi(String ssid, String password, int timeout_s = 20) {
 }
 
 void checkWiFiStatus() {
+    Serial.println("[WIFI] checkWiFiStatus() start");
     prefs.begin("photoframe", true);
     String saved_ssid = prefs.getString("wifi_ssid", "");
     String saved_pass = prefs.getString("wifi_pass", "");
@@ -452,9 +477,10 @@ void checkWiFiStatus() {
     if(saved_ssid.length() > 0) {
         wifi_configured = true;
         Serial.println("Found saved WiFi credentials");
-        
+
         if(connectToWiFi(saved_ssid, saved_pass)) {
             // Successfully connected - display IP
+            Serial.println("[WIFI] Connected - updating display");
             epd.init();
             epd.clear();
             
@@ -471,8 +497,9 @@ void checkWiFiStatus() {
             wifi_configured = false;
         }
     }
-    
+
     // No saved WiFi or connection failed - setup AP
+    Serial.println("[WIFI] Falling back to AP mode");
     setupAccessPoint();
 }
 
@@ -654,6 +681,7 @@ void handleRoot() {
 }
 
 void handleSaveWiFi() {
+    Serial.println("[HTTP] /save-wifi request");
     if(server.hasArg("ssid") && server.hasArg("password")) {
         String ssid = server.arg("ssid");
         String password = server.arg("password");
@@ -675,23 +703,25 @@ void handleSaveWiFi() {
 void handleUpload() {
     HTTPUpload& upload = server.upload();
     static File uploadFile;
-    
+
     if(upload.status == UPLOAD_FILE_START) {
+        Serial.println("[HTTP] /upload start");
         String filename = upload.filename;
         if(!filename.endsWith(".bin")) {
             filename += ".bin";
         }
         String path = "/images/" + filename;
-        
+
         Serial.println("Upload started: " + path);
         uploadFile = SD.open(path, FILE_WRITE);
-    } 
+    }
     else if(upload.status == UPLOAD_FILE_WRITE) {
         if(uploadFile) {
             uploadFile.write(upload.buf, upload.currentSize);
         }
-    } 
+    }
     else if(upload.status == UPLOAD_FILE_END) {
+        Serial.println("[HTTP] /upload end");
         if(uploadFile) {
             uploadFile.close();
             Serial.printf("Upload complete: %s (%d bytes)\n", upload.filename.c_str(), upload.totalSize);
@@ -703,14 +733,16 @@ void handleUpload() {
 }
 
 void handleListImages() {
+    Serial.println("[HTTP] /list-images request");
     String imageList = listImages();
     server.send(200, "application/json", imageList);
 }
 
 void handleDisplay() {
+    Serial.println("[HTTP] /display request");
     if(server.hasArg("image")) {
         String filename = server.arg("image");
-        
+
         if(displayImageFromSD(filename)) {
             server.send(200, "text/plain", "Image displayed successfully!");
         } else {
@@ -722,6 +754,7 @@ void handleDisplay() {
 }
 
 void handleSystemInfo() {
+    Serial.println("[HTTP] /system-info request");
     prefs.begin("photoframe", true);
     String current_img = prefs.getString("current_img", "None");
     String wifi_ssid = prefs.getString("wifi_ssid", "Not configured");
@@ -744,6 +777,7 @@ void handleSystemInfo() {
 }
 
 void setupWebServer() {
+    Serial.println("[HTTP] setupWebServer() start");
     server.on("/", handleRoot);
     server.on("/save-wifi", HTTP_POST, handleSaveWiFi);
     server.on("/upload", HTTP_POST, []() {
@@ -762,19 +796,30 @@ void setupWebServer() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    
+
+    Serial.println("Booting...");
+    Serial.println("Serial interface ready");
+
     Serial.println("\n\n=================================");
     Serial.println("ESP32-C6 E-Paper Photo Frame");
     Serial.println("=================================\n");
-    
+
     // Initialize preferences
+    Serial.println("[SETUP] Loading preferences");
     prefs.begin("photoframe", true);
     current_image = prefs.getString("current_img", "");
     prefs.end();
-    
+    if(current_image.length() == 0) {
+        Serial.println("[SETUP] No previously displayed image recorded");
+    } else {
+        Serial.println("[SETUP] Last displayed image: " + current_image);
+    }
+
     // Initialize hardware
+    Serial.println("[SETUP] Initializing EPD");
     epd.begin();
-    
+
+    Serial.println("[SETUP] Initializing SD card");
     if(!initSDCard()) {
         Serial.println("SD Card required! Halting.");
         epd.init();
@@ -782,13 +827,15 @@ void setup() {
         epd.displayText("ERROR: No SD Card", 100, 500);
         while(1) delay(1000);
     }
-    
+
     // Check WiFi status and configure
+    Serial.println("[SETUP] Checking WiFi status");
     checkWiFiStatus();
-    
+
     // Setup web server
+    Serial.println("[SETUP] Starting web server");
     setupWebServer();
-    
+
     // If we have a saved image and WiFi is working, display it
     if(current_image.length() > 0 && wifi_configured) {
         Serial.println("Displaying saved image: " + current_image);
@@ -797,6 +844,10 @@ void setup() {
         delay(1000);
         displayImageFromSD(current_image);
         last_refresh_time = millis();
+    } else if(current_image.length() == 0) {
+        Serial.println("[SETUP] No saved image to display at boot");
+    } else if(!wifi_configured) {
+        Serial.println("[SETUP] WiFi not configured; skipping auto display");
     }
     
     Serial.println("\nSetup complete!");
@@ -809,14 +860,14 @@ void loop() {
     if(!wifi_configured) {
         dnsServer.processNextRequest();
     }
-    
+
     // Handle web server
     server.handleClient();
-    
+
     // Check for daily refresh
     if(wifi_configured && current_image.length() > 0) {
         unsigned long currentTime = millis();
-        
+
         if(currentTime - last_refresh_time >= REFRESH_INTERVAL) {
             Serial.println("Performing daily refresh...");
             epd.init();
@@ -826,6 +877,16 @@ void loop() {
             last_refresh_time = currentTime;
         }
     }
-    
+
+    static unsigned long lastStatusLog = 0;
+    unsigned long now = millis();
+    if(now - lastStatusLog >= 5000) {
+        Serial.printf("[LOOP] wifi_configured=%d current_image='%s' free_heap=%u\n",
+                      wifi_configured,
+                      current_image.c_str(),
+                      ESP.getFreeHeap());
+        lastStatusLog = now;
+    }
+
     delay(100);
 }
