@@ -310,7 +310,9 @@ void setup() {
 
 ```cpp
 void setup() {
-    if(SD.begin(SD_CS)) {
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+    if(SD.begin(SD_CS, SPI, 20000000)) {
         Serial.println("SD OK!");
         File root = SD.open("/");
         File file = root.openNextFile();

@@ -22,10 +22,18 @@
 #include <SPI.h>
 #include <DNSServer.h>
 #include <time.h>
+#if defined(__has_include)
+#if __has_include(<soc/soc_caps.h>)
 #include <soc/soc_caps.h>
+#endif
+#endif
 
 #ifndef SOC_SPI_PERIPH_NUM
 #define SOC_SPI_PERIPH_NUM 2
+#endif
+
+#if !defined(HSPI)
+#define HSPI FSPI
 #endif
 
 // ==================== PIN DEFINITIONS ====================
@@ -270,6 +278,12 @@ EPaperDisplay epd;
 bool initSDCard() {
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
+
+    // Explicitly initialise the default FSPI bus with the onboard slot's pins
+    // before handing it over to the SD library. Some Arduino core versions do
+    // not automatically attach the default SPI instance to the board specific
+    // pin mapping on first use, which can leave the SD card inaccessible.
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
     // Use the default FSPI bus (shared with the onboard microSD slot) at a
     // conservative clock rate. 80MHz was unreliable with the level shifter on
