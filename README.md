@@ -39,10 +39,14 @@ A smart photo frame using the SparkFun ESP32-C6 Thing Plus and Waveshare 13.3" S
 
 The onboard microSD slot uses:
 - GPIO 21 (MISO)
-- GPIO 20 (MOSI)  
+- GPIO 20 (MOSI)
 - GPIO 19 (SCK)
 - GPIO 18 (CS)
 - GPIO 22 (Card Detect)
+
+> **Note:** The slot is connected through a level shifter, so the firmware
+> drives it at a conservative 20 MHz. Faster settings caused the card to fail to
+> initialise reliably.
 
 ## Software Setup
 

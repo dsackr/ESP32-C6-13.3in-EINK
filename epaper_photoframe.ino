@@ -22,6 +22,19 @@
 #include <SPI.h>
 #include <DNSServer.h>
 #include <time.h>
+#if defined(__has_include)
+#if __has_include(<soc/soc_caps.h>)
+#include <soc/soc_caps.h>
+#endif
+#endif
+
+#ifndef SOC_SPI_PERIPH_NUM
+#define SOC_SPI_PERIPH_NUM 2
+#endif
+
+#if !defined(HSPI)
+#define HSPI FSPI
+#endif
 
 // ==================== PIN DEFINITIONS ====================
 // SD Card pins (onboard - hardware SPI)
@@ -49,8 +62,14 @@
 WebServer server(80);
 DNSServer dnsServer;
 Preferences prefs;
-SPIClass sdSPI(HSPI);
+#if SOC_SPI_PERIPH_NUM > 1
+// Use the second hardware SPI peripheral for the e-paper so the primary bus
+// remains available for the onboard SD card slot on the ESP32-C6 Thing Plus.
+SPIClass epdSPI(HSPI);
+#else
+// Some targets only expose a single general purpose SPI peripheral.
 SPIClass epdSPI(FSPI);
+#endif
 
 // State variables
 String ssid_ap = "EPaper-Setup";
@@ -263,9 +282,19 @@ EPaperDisplay epd;
 // ==================== SD CARD FUNCTIONS ====================
 
 bool initSDCard() {
-    sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    
-    if (!SD.begin(SD_CS, sdSPI, 80000000)) {
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+
+    // Explicitly initialise the default FSPI bus with the onboard slot's pins
+    // before handing it over to the SD library. Some Arduino core versions do
+    // not automatically attach the default SPI instance to the board specific
+    // pin mapping on first use, which can leave the SD card inaccessible.
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+    // Use the default FSPI bus (shared with the onboard microSD slot) at a
+    // conservative clock rate. 80MHz was unreliable with the level shifter on
+    // the SparkFun board and prevented the card from initialising.
+    if (!SD.begin(SD_CS, SPI, 20000000)) {
         Serial.println("SD Card initialization failed!");
         return false;
     }
