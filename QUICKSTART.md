@@ -19,13 +19,14 @@ E-Paper → ESP32-C6
 -----------------
 VCC     → 3.3V
 GND     → GND
-DIN     → GPIO 10
+DIN     → GPIO 3
 CLK     → GPIO 9
-CS_M    → GPIO 8
+CS_M    → GPIO 10
 CS_S    → GPIO 5
 DC      → GPIO 4
-RST     → GPIO 3
-BUSY    → GPIO 2
+RST     → GPIO 2
+BUSY    → GPIO 1
+PWR     → GPIO 11 (display power enable)
 ```
 
 Insert your microSD card into the onboard slot.
