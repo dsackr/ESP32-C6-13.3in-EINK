@@ -22,6 +22,7 @@
 #include <SPI.h>
 #include <DNSServer.h>
 #include <time.h>
+#include <stdarg.h>
 #if defined(__has_include)
 #if __has_include(<soc/soc_caps.h>)
 #include <soc/soc_caps.h>
@@ -75,14 +76,84 @@ SPIClass epdSPI(FSPI);
 String ssid_ap = "EPaper-Setup";
 String current_image = "";
 bool wifi_configured = false;
-bool display_needs_refresh = true;
 unsigned long last_refresh_time = 0;
 const unsigned long REFRESH_INTERVAL = 24UL * 60UL * 60UL * 1000UL; // 24 hours
+bool access_point_active = false;
+
+enum LogLevel : uint8_t {
+    LOG_SILENT = 1,
+    LOG_STANDARD = 2,
+    LOG_VERBOSE = 3
+};
+
+LogLevel currentLogLevel = LOG_STANDARD;
+
+enum NetworkMode : uint8_t {
+    NETWORK_MODE_STA,
+    NETWORK_MODE_AP
+};
+
+void logVPrintf(LogLevel level, const char* format, va_list args) {
+    if (currentLogLevel < level) {
+        return;
+    }
+    Serial.vprintf(format, args);
+}
+
+void logPrintf(LogLevel level, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    logVPrintf(level, format, args);
+    va_end(args);
+}
+
+void logPrintln(LogLevel level, const String& message) {
+    if (currentLogLevel < level) {
+        return;
+    }
+    Serial.println(message);
+}
+
+void logPrintln(LogLevel level, const char* message) {
+    if (currentLogLevel < level) {
+        return;
+    }
+    Serial.println(message);
+}
+
+void setLogLevel(LogLevel level, bool persist = false) {
+    LogLevel clamped = level;
+    if (clamped < LOG_SILENT) {
+        clamped = LOG_SILENT;
+    } else if (clamped > LOG_VERBOSE) {
+        clamped = LOG_VERBOSE;
+    }
+    currentLogLevel = clamped;
+
+    if (persist) {
+        prefs.begin("photoframe", false);
+        prefs.putUChar("log_level", static_cast<uint8_t>(currentLogLevel));
+        prefs.end();
+    }
+
+    const char* levelName = currentLogLevel == LOG_VERBOSE ? "VERBOSE" :
+                            currentLogLevel == LOG_STANDARD ? "STANDARD" : "SILENT";
+    Serial.printf("[LOG] Logging level set to %s (%d)\n", levelName, static_cast<int>(currentLogLevel));
+}
+
+#define LOGE(format, ...) logPrintf(LOG_SILENT, format, ##__VA_ARGS__)
+#define LOGI(format, ...) logPrintf(LOG_STANDARD, format, ##__VA_ARGS__)
+#define LOGV(format, ...) logPrintf(LOG_VERBOSE, format, ##__VA_ARGS__)
+#define LOGELN(message) logPrintln(LOG_SILENT, message)
+#define LOGILN(message) logPrintln(LOG_STANDARD, message)
+#define LOGVLN(message) logPrintln(LOG_VERBOSE, message)
 
 // ==================== E-PAPER DISPLAY FUNCTIONS ====================
 
 class EPaperDisplay {
 private:
+    bool available = true;
+
     void spiTransfer(uint8_t data) {
         epdSPI.transfer(data);
     }
@@ -101,74 +172,95 @@ private:
         digitalWrite(cs_pin, HIGH);
     }
 
-    void waitUntilIdle() {
-        Serial.println("Waiting for display...");
+    bool waitForIdle(const char* context, unsigned long timeoutMs = 30000) {
+        if (!available) {
+            LOGELN("[EPD] waitForIdle() skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        LOGVLN(String("[EPD] waitForIdle() monitoring BUSY pin during ") + context + ". LOW = busy. Expect the display to resume within 30 seconds.");
         unsigned long startTime = millis();
         int busyState = digitalRead(EPD_BUSY);
-        Serial.printf("[EPD] BUSY=%d\n", busyState);
+        LOGV("[EPD] Initial BUSY state: %d\n", busyState);
         unsigned long lastLog = 0;
-        while(busyState == LOW) {
+        while (busyState == LOW) {
             delay(10);
             busyState = digitalRead(EPD_BUSY);
             unsigned long elapsed = millis() - startTime;
-            if(elapsed - lastLog >= 1000) {
-                Serial.printf("[EPD] Still busy... BUSY=%d elapsed=%lu ms\n", busyState, elapsed);
+            if (elapsed - lastLog >= 1000) {
+                LOGV("[EPD] Display controller still busy (BUSY=%d). Waiting for refresh to finish... %lu ms elapsed\n", busyState, elapsed);
                 lastLog = elapsed;
             }
-            if(elapsed > 30000) { // 30 second timeout
-                Serial.println("Display timeout!");
-                break;
+            if (elapsed > timeoutMs) {
+                LOGELN(String("[EPD] Display timed out while ") + context + ". BUSY pin held LOW for over " + String(timeoutMs) + " ms. Check power and BUSY wiring.");
+                available = false;
+                return false;
             }
         }
+        if (busyState != LOW) {
+            LOGV("[EPD] BUSY pin released after %lu ms. Continuing.\n", millis() - startTime);
+        }
         delay(200);
+        return true;
     }
 
     void initializeIC(uint8_t cs_pin) {
+        LOGV("[EPD] Configuring controller on CS pin %u\n", cs_pin);
         // Software reset
         sendCommand(cs_pin, 0x12);
         delay(10);
-        
+
         // Set display settings
         sendCommand(cs_pin, 0x00); // Panel setting
         sendData(cs_pin, 0x1F);    // KW-3f, KWR-2F, BWROTP 0f, BWOTP 1f
-        
+
         sendCommand(cs_pin, 0x61); // Resolution setting
         sendData(cs_pin, (EPD_HALF_WIDTH >> 8) & 0xFF);
         sendData(cs_pin, EPD_HALF_WIDTH & 0xFF);
         sendData(cs_pin, (EPD_HEIGHT >> 8) & 0xFF);
         sendData(cs_pin, EPD_HEIGHT & 0xFF);
-        
+
         sendCommand(cs_pin, 0x50); // VCOM and data interval
         sendData(cs_pin, 0x97);
+        LOGV("[EPD] Controller on CS %u configured\n", cs_pin);
     }
 
 public:
     void begin() {
-        Serial.println("[EPD] begin() start");
-        // Initialize pins
+        LOGILN("[EPD] Powering up e-paper interface");
+        LOGVLN("[EPD] Configuring GPIO directions for display control pins");
         pinMode(EPD_PWR, OUTPUT);
         pinMode(EPD_CS_M, OUTPUT);
         pinMode(EPD_CS_S, OUTPUT);
         pinMode(EPD_DC, OUTPUT);
         pinMode(EPD_RST, OUTPUT);
-        pinMode(EPD_BUSY, INPUT);
+        pinMode(EPD_BUSY, INPUT_PULLUP);
 
         digitalWrite(EPD_PWR, LOW);
         digitalWrite(EPD_CS_M, HIGH);
         digitalWrite(EPD_CS_S, HIGH);
 
-        Serial.printf("[EPD] BUSY pin initial state: %d\n", digitalRead(EPD_BUSY));
-        Serial.printf("[EPD] RST pin initial state: %d\n", digitalRead(EPD_RST));
+        LOGV("[EPD] BUSY pin initial state: %d\n", digitalRead(EPD_BUSY));
+        LOGV("[EPD] RST pin initial state: %d\n", digitalRead(EPD_RST));
 
-        // Initialize SPI
+        if (digitalRead(EPD_BUSY) == LOW) {
+            LOGELN("[EPD] BUSY pin is LOW at startup. The panel may be holding the line or missing its pull-up. Display commands will pause until it releases.");
+        }
+
+        LOGVLN("[EPD] Attaching HSPI bus for display communication (4MHz)");
         epdSPI.begin(EPD_SCK, -1, EPD_MOSI, -1);
         epdSPI.setFrequency(4000000); // 4MHz
 
-        Serial.println("E-Paper initialized");
+        LOGILN("[EPD] Display interface ready. Expect BUSY pin to toggle during refresh operations.");
+        available = true;
+    }
+
+    bool isAvailable() const {
+        return available;
     }
 
     void reset() {
-        Serial.println("[EPD] Performing hardware reset");
+        LOGILN("[EPD] Performing hardware reset on both controllers");
         digitalWrite(EPD_PWR, HIGH);
         delay(10);
         digitalWrite(EPD_RST, HIGH);
@@ -177,25 +269,39 @@ public:
         delay(2);
         digitalWrite(EPD_RST, HIGH);
         delay(20);
+        LOGVLN("[EPD] Hardware reset complete");
     }
 
-    void init() {
-        Serial.println("[EPD] init() start");
+    bool initializeControllers() {
+        if (!available) {
+            LOGELN("[EPD] initializeControllers() skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        LOGILN("[EPD] Initializing display controllers (expect the panel to clear and flash)");
         reset();
-        waitUntilIdle();
+        if (!waitForIdle("post-reset")) {
+            return false;
+        }
 
         // Initialize both ICs
-        Serial.println("[EPD] Initializing master IC");
+        LOGVLN("[EPD] Initializing master controller");
         initializeIC(EPD_CS_M);
-        Serial.println("[EPD] Initializing slave IC");
+        LOGVLN("[EPD] Initializing slave controller");
         initializeIC(EPD_CS_S);
 
-        Serial.println("Display initialized");
+        LOGILN("[EPD] Display initialization complete");
+        return true;
     }
 
-    void clear() {
-        Serial.println("Clearing display...");
-        
+    bool clearPanel() {
+        if (!available) {
+            LOGELN("[EPD] clearPanel() skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        LOGILN("[EPD] Clearing display to white. Expect a full screen flash.");
+
         // Clear master area
         sendCommand(EPD_CS_M, 0x10); // Start transmission
         for(int i = 0; i < (EPD_HALF_WIDTH * EPD_HEIGHT) / 8; i++) {
@@ -207,34 +313,58 @@ public:
         for(int i = 0; i < (EPD_HALF_WIDTH * EPD_HEIGHT) / 8; i++) {
             sendData(EPD_CS_S, 0xFF);
         }
-        
-        refresh();
+
+        if (!refreshPanel()) {
+            return false;
+        }
+        return true;
     }
 
-    void refresh() {
-        Serial.println("Refreshing display...");
-        
+    bool refreshPanel() {
+        if (!available) {
+            LOGELN("[EPD] refreshPanel() skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        LOGILN("[EPD] Triggering display refresh. Panel should update shortly.");
+
         // Refresh both ICs
         sendCommand(EPD_CS_M, 0x04); // Power on
-        waitUntilIdle();
+        if (!waitForIdle("master power on")) {
+            return false;
+        }
         sendCommand(EPD_CS_S, 0x04);
-        waitUntilIdle();
-        
+        if (!waitForIdle("slave power on")) {
+            return false;
+        }
+
         sendCommand(EPD_CS_M, 0x12); // Display refresh
         sendCommand(EPD_CS_S, 0x12);
         delay(100);
-        waitUntilIdle();
-        
-        Serial.println("Display refresh complete");
+        if (!waitForIdle("display refresh")) {
+            return false;
+        }
+
+        LOGILN("[EPD] Display refresh complete");
+        return true;
     }
 
-    void sleep() {
-        Serial.println("Putting display to sleep...");
+    bool enterDeepSleep() {
+        if (!available) {
+            LOGELN("[EPD] enterDeepSleep() skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        LOGILN("[EPD] Entering deep sleep to save power");
 
         sendCommand(EPD_CS_M, 0x02); // Power off
-        waitUntilIdle();
+        if (!waitForIdle("master power off")) {
+            return false;
+        }
         sendCommand(EPD_CS_S, 0x02);
-        waitUntilIdle();
+        if (!waitForIdle("slave power off")) {
+            return false;
+        }
 
         sendCommand(EPD_CS_M, 0x07); // Deep sleep
         sendData(EPD_CS_M, 0xA5);
@@ -243,26 +373,35 @@ public:
 
         digitalWrite(EPD_PWR, LOW);
 
-        Serial.println("Display in deep sleep");
+        LOGILN("[EPD] Display is now in deep sleep");
+        return true;
     }
 
-    void displayBitmap(uint8_t* imageData, int dataSize) {
+    bool renderBitmap(uint8_t* imageData, int dataSize) {
         if(imageData == NULL || dataSize == 0) {
-            Serial.println("Invalid image data");
-            return;
+            LOGELN("[EPD] Invalid image data passed to renderBitmap");
+            return false;
         }
-        
-        Serial.println("Displaying bitmap...");
-        init();
-        
+
+        if (!available) {
+            LOGELN("[EPD] Skipping renderBitmap because the display is marked unavailable. Check previous error logs.");
+            return false;
+        }
+
+        LOGILN("[EPD] Displaying bitmap. Expect a two-stage refresh (left then right controller).");
+        if (!initializeControllers()) {
+            LOGELN("[EPD] renderBitmap aborted because initialization failed.");
+            return false;
+        }
+
         int halfDataSize = dataSize / 2;
-        
+
         // Send to master area (left half)
         sendCommand(EPD_CS_M, 0x10);
         for(int i = 0; i < halfDataSize; i++) {
             sendData(EPD_CS_M, imageData[i]);
             if(i % 10000 == 0) {
-                Serial.printf("Master: %d/%d\n", i, halfDataSize);
+                LOGV("[EPD] Master load progress: %d/%d bytes\n", i, halfDataSize);
             }
         }
         
@@ -271,26 +410,45 @@ public:
         for(int i = halfDataSize; i < dataSize; i++) {
             sendData(EPD_CS_S, imageData[i]);
             if((i - halfDataSize) % 10000 == 0) {
-                Serial.printf("Slave: %d/%d\n", i - halfDataSize, halfDataSize);
+                LOGV("[EPD] Slave load progress: %d/%d bytes\n", i - halfDataSize, halfDataSize);
             }
         }
-        
-        refresh();
-        sleep();
+
+        if (!refreshPanel()) {
+            LOGELN("[EPD] Bitmap transfer complete but refresh failed. Display remains marked unavailable.");
+            return false;
+        }
+        if (!enterDeepSleep()) {
+            return false;
+        }
+        return true;
     }
 
-    void displayText(const char* text, int x, int y) {
+    bool renderText(const char* text, int x, int y) {
         // Simple text display for WiFi info
         // This is a simplified version - you'd want a proper font library
-        init();
-        clear();
-        
+        if (!available) {
+            LOGELN("[EPD] renderText skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        if (!initializeControllers()) {
+            LOGELN("[EPD] renderText aborted because initialization failed.");
+            return false;
+        }
+        if (!clearPanel()) {
+            LOGELN("[EPD] renderText aborted because clearing the display failed.");
+            return false;
+        }
+
         // For now, just display something visible
         // In production, use GFX library with fonts
-        Serial.printf("Would display: %s at (%d, %d)\n", text, x, y);
-        
-        refresh();
-        sleep();
+        LOGI("[EPD] Text placeholder -> '%s' at (%d,%d). Expect a future font renderer here.\n", text, x, y);
+
+        if (!enterDeepSleep()) {
+            return false;
+        }
+        return true;
     }
 };
 
@@ -299,7 +457,8 @@ EPaperDisplay epd;
 // ==================== SD CARD FUNCTIONS ====================
 
 bool initSDCard() {
-    Serial.println("[SD] Initializing SD card interface");
+    LOGILN("[SD] Initializing SD card interface");
+    LOGVLN("[SD] Preparing chip select pin and shared SPI bus");
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
 
@@ -312,31 +471,31 @@ bool initSDCard() {
     // Use the default FSPI bus (shared with the onboard microSD slot) at a
     // conservative clock rate. 80MHz was unreliable with the level shifter on
     // the SparkFun board and prevented the card from initialising.
-    Serial.println("[SD] Calling SD.begin()");
+    LOGVLN("[SD] Calling SD.begin() at 20MHz. Expect a short pause during card detection.");
     if (!SD.begin(SD_CS, SPI, 20000000)) {
-        Serial.println("SD Card initialization failed!");
+        LOGELN("[SD] SD Card initialization failed! Insert or reseat the card and reset the device.");
         return false;
     }
     
     uint8_t cardType = SD.cardType();
     if (cardType == CARD_NONE) {
-        Serial.println("No SD card attached");
+        LOGELN("[SD] No SD card detected. The display cannot load images.");
         return false;
     }
     
-    Serial.println("SD Card initialized");
-    Serial.printf("SD Card Type: %s\n", 
+    LOGILN("[SD] SD card initialized successfully");
+    LOGI("[SD] SD Card Type: %s\n", 
                   cardType == CARD_MMC ? "MMC" :
                   cardType == CARD_SD ? "SD" :
                   cardType == CARD_SDHC ? "SDHC" : "UNKNOWN");
     
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("SD Card Size: %lluMB\n", cardSize);
+    LOGI("[SD] SD Card Size: %lluMB\n", cardSize);
     
     // Create images directory if it doesn't exist
     if(!SD.exists("/images")) {
         SD.mkdir("/images");
-        Serial.println("Created /images directory");
+        LOGILN("[SD] Created /images directory for uploaded assets");
     }
     
     return true;
@@ -367,83 +526,86 @@ String listImages() {
 }
 
 bool displayImageFromSD(String filename) {
-    Serial.println("[IMG] displayImageFromSD start");
+    LOGVLN("[IMG] displayImageFromSD() invoked");
     String path = "/images/" + filename;
     File file = SD.open(path);
     
     if(!file) {
-        Serial.println("Failed to open image file: " + path);
+        LOGELN("[IMG] Failed to open image file: " + path);
         return false;
     }
     
     size_t fileSize = file.size();
-    Serial.printf("Loading image: %s (%d bytes)\n", filename.c_str(), fileSize);
+    LOGI("[IMG] Loading image: %s (%d bytes). Expect the panel to refresh after transfer.\n", filename.c_str(), fileSize);
     
     // Allocate buffer for image data
     uint8_t* imageBuffer = (uint8_t*)malloc(fileSize);
     if(imageBuffer == NULL) {
-        Serial.println("Failed to allocate memory for image");
+        LOGELN("[IMG] Failed to allocate memory for image");
         file.close();
         return false;
     }
     
     // Read file into buffer
-    Serial.println("[IMG] Reading file into buffer");
+    LOGVLN("[IMG] Reading file into RAM buffer");
     size_t bytesRead = file.read(imageBuffer, fileSize);
     file.close();
 
     if(bytesRead != fileSize) {
-        Serial.println("Failed to read complete image file");
+        LOGELN("[IMG] Failed to read complete image file");
         free(imageBuffer);
         return false;
     }
 
     // Display image
-    Serial.println("[IMG] Sending image buffer to EPD");
-    epd.displayBitmap(imageBuffer, fileSize);
+    LOGVLN("[IMG] Sending buffered image to display controller");
+    bool renderSuccess = epd.renderBitmap(imageBuffer, fileSize);
     free(imageBuffer);
-    
+
+    if(!renderSuccess) {
+        LOGELN("[IMG] Display driver reported a failure while rendering the bitmap. Leaving current image unchanged.");
+        return false;
+    }
+
     // Save current image to preferences
     prefs.begin("photoframe", false);
     prefs.putString("current_img", filename);
     prefs.end();
     current_image = filename;
     
-    Serial.println("Image displayed successfully");
+    LOGILN("[IMG] Image displayed successfully");
     return true;
 }
 
 // ==================== WIFI FUNCTIONS ====================
 
-void setupAccessPoint() {
-    Serial.println("[WIFI] setupAccessPoint() start");
-    Serial.println("Setting up Access Point...");
-    
+IPAddress startAccessPointNetwork() {
+    LOGILN("[WIFI] Entering Access Point mode for first-time setup");
+    access_point_active = true;
+
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(ssid_ap.c_str());
-    
+    if (!WiFi.softAP(ssid_ap.c_str())) {
+        LOGELN("[WIFI] Failed to start Access Point. Check antenna and try again after reset.");
+    }
+
     IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
-    Serial.println(IP);
+    if (IP == IPAddress(0, 0, 0, 0)) {
+        LOGELN("[WIFI] Access Point returned an invalid IP (0.0.0.0). DNS and captive portal will not function correctly.");
+    }
+    LOGI("[WIFI] Access Point IP address: %s\n", IP.toString().c_str());
+    LOGILN("[WIFI] Expect to connect your laptop/phone to the '" + ssid_ap + "' network and browse to http://" + IP.toString());
     
     // Start DNS server for captive portal
     dnsServer.start(53, "*", IP);
-    
-    // Display WiFi info on e-paper
-    epd.init();
-    epd.clear();
-    
-    String displayText = "Connect to WiFi:\n" + ssid_ap + "\nThen go to:\n192.168.4.1";
-    epd.displayText(displayText.c_str(), 100, 400);
-    
-    Serial.println("Access Point ready");
-    Serial.println("Connect to: " + ssid_ap);
-    Serial.println("Then navigate to: http://192.168.4.1");
+    LOGILN("[WIFI] Captive portal DNS server running");
+
+    LOGILN("[WIFI] Access Point network ready for configuration");
+    return IP;
 }
 
 bool connectToWiFi(String ssid, String password, int timeout_s = 20) {
-    Serial.printf("[WIFI] connectToWiFi('%s')\n", ssid.c_str());
-    Serial.println("Connecting to WiFi: " + ssid);
+    LOGI("[WIFI] Attempting to connect to WiFi SSID '%s'\n", ssid.c_str());
+    LOGILN("[WIFI] Expect the status LED (if connected) and logs to update within ~" + String(timeout_s) + " seconds.");
     
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), password.c_str());
@@ -451,56 +613,80 @@ bool connectToWiFi(String ssid, String password, int timeout_s = 20) {
     int elapsed = 0;
     while (WiFi.status() != WL_CONNECTED && elapsed < timeout_s) {
         delay(1000);
-        Serial.print(".");
+        LOGV("[WIFI] Waiting for connection... %d/%d seconds elapsed\n", elapsed + 1, timeout_s);
         elapsed++;
     }
-    Serial.println();
     
     if(WiFi.status() == WL_CONNECTED) {
-        Serial.println("Connected!");
-        Serial.print("IP Address: ");
-        Serial.println(WiFi.localIP());
+        LOGILN("[WIFI] Connected to WiFi successfully");
+        LOGI("[WIFI] Device IP Address: %s\n", WiFi.localIP().toString().c_str());
         return true;
     } else {
-        Serial.println("Connection failed");
+        LOGELN("[WIFI] Connection failed. Falling back to Access Point mode.");
         return false;
     }
 }
 
-void checkWiFiStatus() {
-    Serial.println("[WIFI] checkWiFiStatus() start");
+void displayAccessPointInstructions(const IPAddress& ip) {
+    String displayText = "Connect to WiFi:\n" + ssid_ap + "\nThen go to:\n" + ip.toString();
+
+    if (!epd.isAvailable()) {
+        LOGELN("[WIFI] Display unavailable. Provide these captive portal instructions to the user via serial/logs: " + displayText);
+        return;
+    }
+
+    LOGVLN("[WIFI] Rendering Access Point instructions on e-paper display");
+    if (!epd.renderText(displayText.c_str(), 100, 400)) {
+        LOGELN("[WIFI] Failed to render Access Point instructions on the display. Check BUSY line and power rails.");
+        return;
+    }
+    LOGILN("[WIFI] Display updated with Access Point connection steps");
+}
+
+void displayStationConnectionInfo(const IPAddress& ip) {
+    String displayText = "Connected!\nUpload images to:\nhttp://" + ip.toString();
+
+    if (!epd.isAvailable()) {
+        LOGELN("[WIFI] Display unavailable. Provide station-mode instructions via serial/logs: " + displayText);
+        return;
+    }
+
+    LOGVLN("[WIFI] Rendering station-mode status on e-paper display");
+    if (!epd.renderText(displayText.c_str(), 100, 400)) {
+        LOGELN("[WIFI] Failed to render station-mode status on the display. Check BUSY line and power rails.");
+        return;
+    }
+    LOGILN("[WIFI] Display updated with WiFi connection details");
+}
+
+NetworkMode establishNetwork(IPAddress& networkIP) {
+    LOGILN("[WIFI] Checking saved WiFi credentials");
     prefs.begin("photoframe", true);
     String saved_ssid = prefs.getString("wifi_ssid", "");
     String saved_pass = prefs.getString("wifi_pass", "");
     prefs.end();
-    
+
     if(saved_ssid.length() > 0) {
         wifi_configured = true;
-        Serial.println("Found saved WiFi credentials");
+        LOGILN("[WIFI] Saved credentials found. Attempting to reconnect automatically.");
 
         if(connectToWiFi(saved_ssid, saved_pass)) {
-            // Successfully connected - display IP
-            Serial.println("[WIFI] Connected - updating display");
-            epd.init();
-            epd.clear();
-            
-            String displayText = "Connected!\nUpload images to:\nhttp://" + WiFi.localIP().toString();
-            epd.displayText(displayText.c_str(), 100, 400);
-            
-            // Configure time
+            access_point_active = false;
+            networkIP = WiFi.localIP();
             configTime(0, 0, "pool.ntp.org");
-            
-            return;
-        } else {
-            // Can't connect - go to AP mode
-            Serial.println("Cannot connect to saved WiFi");
-            wifi_configured = false;
+            LOGILN("[WIFI] WiFi connected. Use the reported IP for the web interface.");
+            return NETWORK_MODE_STA;
         }
+
+        LOGELN("[WIFI] Unable to connect using stored credentials. Switching to Access Point mode.");
+        wifi_configured = false;
+    } else {
+        LOGILN("[WIFI] No stored WiFi credentials found");
     }
 
-    // No saved WiFi or connection failed - setup AP
-    Serial.println("[WIFI] Falling back to AP mode");
-    setupAccessPoint();
+    networkIP = startAccessPointNetwork();
+    wifi_configured = false;
+    return NETWORK_MODE_AP;
 }
 
 // ==================== WEB SERVER HANDLERS ====================
@@ -677,11 +863,12 @@ const char index_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 void handleRoot() {
+    LOGVLN("[HTTP] Serving root UI page");
     server.send(200, "text/html", index_html);
 }
 
 void handleSaveWiFi() {
-    Serial.println("[HTTP] /save-wifi request");
+    LOGILN("[HTTP] Received /save-wifi request");
     if(server.hasArg("ssid") && server.hasArg("password")) {
         String ssid = server.arg("ssid");
         String password = server.arg("password");
@@ -690,12 +877,15 @@ void handleSaveWiFi() {
         prefs.putString("wifi_ssid", ssid);
         prefs.putString("wifi_pass", password);
         prefs.end();
+
+        LOGI("[HTTP] Stored WiFi credentials for SSID '%s'. Device will restart to apply changes.\n", ssid.c_str());
         
         server.send(200, "text/plain", "WiFi credentials saved! Device will restart...");
         
         delay(1000);
         ESP.restart();
     } else {
+        LOGELN("[HTTP] Missing parameters for /save-wifi");
         server.send(400, "text/plain", "Missing parameters");
     }
 }
@@ -705,14 +895,14 @@ void handleUpload() {
     static File uploadFile;
 
     if(upload.status == UPLOAD_FILE_START) {
-        Serial.println("[HTTP] /upload start");
+        LOGILN("[HTTP] Upload initiated");
         String filename = upload.filename;
         if(!filename.endsWith(".bin")) {
             filename += ".bin";
         }
         String path = "/images/" + filename;
 
-        Serial.println("Upload started: " + path);
+        LOGI("[HTTP] Upload started: %s\n", path.c_str());
         uploadFile = SD.open(path, FILE_WRITE);
     }
     else if(upload.status == UPLOAD_FILE_WRITE) {
@@ -721,40 +911,43 @@ void handleUpload() {
         }
     }
     else if(upload.status == UPLOAD_FILE_END) {
-        Serial.println("[HTTP] /upload end");
+        LOGVLN("[HTTP] Upload finished streaming to storage");
         if(uploadFile) {
             uploadFile.close();
-            Serial.printf("Upload complete: %s (%d bytes)\n", upload.filename.c_str(), upload.totalSize);
+            LOGI("[HTTP] Upload complete: %s (%d bytes)\n", upload.filename.c_str(), upload.totalSize);
             server.send(200, "text/plain", "Upload success!");
         } else {
+            LOGELN("[HTTP] Upload failed to open file for writing");
             server.send(500, "text/plain", "Upload failed!");
         }
     }
 }
 
 void handleListImages() {
-    Serial.println("[HTTP] /list-images request");
+    LOGVLN("[HTTP] Listing stored images");
     String imageList = listImages();
     server.send(200, "application/json", imageList);
 }
 
 void handleDisplay() {
-    Serial.println("[HTTP] /display request");
+    LOGILN("[HTTP] Display image request received");
     if(server.hasArg("image")) {
         String filename = server.arg("image");
 
         if(displayImageFromSD(filename)) {
             server.send(200, "text/plain", "Image displayed successfully!");
         } else {
+            LOGELN("[HTTP] Failed to display requested image");
             server.send(500, "text/plain", "Failed to display image");
         }
     } else {
+        LOGELN("[HTTP] Missing image parameter for /display");
         server.send(400, "text/plain", "Missing image parameter");
     }
 }
 
 void handleSystemInfo() {
-    Serial.println("[HTTP] /system-info request");
+    LOGVLN("[HTTP] Reporting system information");
     prefs.begin("photoframe", true);
     String current_img = prefs.getString("current_img", "None");
     String wifi_ssid = prefs.getString("wifi_ssid", "Not configured");
@@ -768,16 +961,32 @@ void handleSystemInfo() {
     json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
     json += "\"sd_size\":" + String((uint32_t)cardSize) + ",";
     json += "\"sd_used\":" + String((uint32_t)cardUsed) + ",";
+    IPAddress reportIP = access_point_active ? WiFi.softAPIP() : WiFi.localIP();
     json += "\"wifi_ssid\":\"" + wifi_ssid + "\",";
     json += "\"wifi_rssi\":" + String(WiFi.RSSI()) + ",";
-    json += "\"ip_address\":\"" + WiFi.localIP().toString() + "\"";
+    json += "\"ip_address\":\"" + reportIP.toString() + "\",";
+    json += "\"log_level\":" + String(static_cast<int>(currentLogLevel)) + ",";
+    json += "\"mode\":\"" + String(access_point_active ? "AP" : "STA") + "\"";
     json += "}";
     
     server.send(200, "application/json", json);
 }
 
+void handleSetLogLevel() {
+    LOGILN("[HTTP] Log level change requested");
+    if(server.hasArg("level")) {
+        int requested = server.arg("level").toInt();
+        setLogLevel(static_cast<LogLevel>(requested), true);
+        String response = "Log level updated to " + String(static_cast<int>(currentLogLevel));
+        server.send(200, "text/plain", response);
+    } else {
+        LOGELN("[HTTP] Missing level parameter for /set-log-level");
+        server.send(400, "text/plain", "Missing level parameter");
+    }
+}
+
 void setupWebServer() {
-    Serial.println("[HTTP] setupWebServer() start");
+    LOGILN("[HTTP] Configuring HTTP routes");
     server.on("/", handleRoot);
     server.on("/save-wifi", HTTP_POST, handleSaveWiFi);
     server.on("/upload", HTTP_POST, []() {
@@ -786,9 +995,10 @@ void setupWebServer() {
     server.on("/list-images", handleListImages);
     server.on("/display", handleDisplay);
     server.on("/system-info", handleSystemInfo);
+    server.on("/set-log-level", handleSetLogLevel);
     
     server.begin();
-    Serial.println("Web server started");
+    LOGILN("[HTTP] Web server started and ready for requests");
 }
 
 // ==================== MAIN SETUP ====================
@@ -797,60 +1007,67 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    Serial.println("Booting...");
-    Serial.println("Serial interface ready");
+    LOGELN("[SETUP] Booting..."); // ensure visibility even at low log level
+    LOGILN("[SETUP] Serial interface ready");
 
-    Serial.println("\n\n=================================");
-    Serial.println("ESP32-C6 E-Paper Photo Frame");
-    Serial.println("=================================\n");
+    LOGILN("\n\n=================================\nESP32-C6 E-Paper Photo Frame\n=================================");
 
-    // Initialize preferences
-    Serial.println("[SETUP] Loading preferences");
+    // Initialize preferences and log level
+    LOGILN("[SETUP] Loading preferences");
     prefs.begin("photoframe", true);
     current_image = prefs.getString("current_img", "");
+    uint8_t storedLevel = prefs.getUChar("log_level", static_cast<uint8_t>(LOG_STANDARD));
     prefs.end();
+    setLogLevel(static_cast<LogLevel>(storedLevel));
+
     if(current_image.length() == 0) {
-        Serial.println("[SETUP] No previously displayed image recorded");
+        LOGILN("[SETUP] No previously displayed image recorded");
     } else {
-        Serial.println("[SETUP] Last displayed image: " + current_image);
+        LOGILN("[SETUP] Last displayed image: " + current_image);
     }
 
     // Initialize hardware
-    Serial.println("[SETUP] Initializing EPD");
+    LOGILN("[SETUP] Initializing e-paper interface");
     epd.begin();
 
-    Serial.println("[SETUP] Initializing SD card");
+    LOGILN("[SETUP] Initializing SD card");
     if(!initSDCard()) {
-        Serial.println("SD Card required! Halting.");
-        epd.init();
-        epd.clear();
-        epd.displayText("ERROR: No SD Card", 100, 500);
+        LOGELN("[SETUP] SD Card required! Halting.");
+        if (!epd.renderText("ERROR: No SD Card", 100, 500)) {
+            LOGELN("[SETUP] Unable to render SD card error on the display. Check BUSY pin state and cabling.");
+        }
         while(1) delay(1000);
     }
 
-    // Check WiFi status and configure
-    Serial.println("[SETUP] Checking WiFi status");
-    checkWiFiStatus();
+    LOGILN("[SETUP] Establishing network connectivity");
+    IPAddress networkIP;
+    NetworkMode mode = establishNetwork(networkIP);
 
-    // Setup web server
-    Serial.println("[SETUP] Starting web server");
+    LOGILN("[SETUP] Starting web server");
     setupWebServer();
+
+    if(mode == NETWORK_MODE_STA) {
+        LOGILN("[SETUP] Web interface available at http://" + networkIP.toString());
+        displayStationConnectionInfo(networkIP);
+    } else {
+        LOGILN("[SETUP] Captive portal available at http://" + networkIP.toString());
+        displayAccessPointInstructions(networkIP);
+    }
 
     // If we have a saved image and WiFi is working, display it
     if(current_image.length() > 0 && wifi_configured) {
-        Serial.println("Displaying saved image: " + current_image);
-        epd.init();
-        epd.clear();
-        delay(1000);
-        displayImageFromSD(current_image);
+        LOGILN("[SETUP] Displaying last selected image: " + current_image + ". Expect the panel to refresh shortly.");
+        if (!displayImageFromSD(current_image)) {
+            LOGELN("[SETUP] Failed to restore the previous image to the panel during boot.");
+        }
         last_refresh_time = millis();
     } else if(current_image.length() == 0) {
-        Serial.println("[SETUP] No saved image to display at boot");
+        LOGILN("[SETUP] No saved image to display at boot");
     } else if(!wifi_configured) {
-        Serial.println("[SETUP] WiFi not configured; skipping auto display");
+        LOGILN("[SETUP] WiFi not configured; skipping auto display");
     }
     
-    Serial.println("\nSetup complete!");
+    LOGILN("\nSetup complete! System is ready.");
 }
 
 // ==================== MAIN LOOP ====================
@@ -869,11 +1086,10 @@ void loop() {
         unsigned long currentTime = millis();
 
         if(currentTime - last_refresh_time >= REFRESH_INTERVAL) {
-            Serial.println("Performing daily refresh...");
-            epd.init();
-            epd.clear();
-            delay(1000);
-            displayImageFromSD(current_image);
+            LOGILN("[LOOP] Performing scheduled daily refresh of the display");
+            if (!displayImageFromSD(current_image)) {
+                LOGELN("[LOOP] Scheduled refresh failed. Display state unchanged.");
+            }
             last_refresh_time = currentTime;
         }
     }
@@ -881,10 +1097,10 @@ void loop() {
     static unsigned long lastStatusLog = 0;
     unsigned long now = millis();
     if(now - lastStatusLog >= 5000) {
-        Serial.printf("[LOOP] wifi_configured=%d current_image='%s' free_heap=%u\n",
-                      wifi_configured,
-                      current_image.c_str(),
-                      ESP.getFreeHeap());
+        LOGV("[LOOP] wifi_configured=%d current_image='%s' free_heap=%u\n",
+             wifi_configured,
+             current_image.c_str(),
+             ESP.getFreeHeap());
         lastStatusLog = now;
     }
 
