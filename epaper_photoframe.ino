@@ -173,13 +173,8 @@ private:
         digitalWrite(cs_pin, HIGH);
     }
 
-    bool waitForIdle(const char* context, unsigned long timeoutMs = 30000) {
-        if (!available) {
-            LOGELN("[EPD] waitForIdle() skipped because the display is marked unavailable.");
-            return false;
-        }
-
-        LOGVLN(String("[EPD] waitForIdle() monitoring BUSY pin during ") + context + ". LOW = busy. Expect the display to resume within 30 seconds.");
+    void waitUntilIdle() {
+        LOGVLN("[EPD] waitUntilIdle() -> monitoring BUSY pin (LOW = busy). Expect the display to resume within 30 seconds.");
         unsigned long startTime = millis();
         int busyState = digitalRead(EPD_BUSY);
         LOGV("[EPD] Initial BUSY state: %d\n", busyState);
@@ -192,10 +187,9 @@ private:
                 LOGV("[EPD] Display controller still busy (BUSY=%d). Waiting for refresh to finish... %lu ms elapsed\n", busyState, elapsed);
                 lastLog = elapsed;
             }
-            if (elapsed > timeoutMs) {
-                LOGELN(String("[EPD] Display timed out while ") + context + ". BUSY pin held LOW for over " + String(timeoutMs) + " ms. Check power and BUSY wiring.");
-                available = false;
-                return false;
+            if (elapsed > 30000) { // 30 second timeout
+                LOGELN("[EPD] Display timed out after 30 seconds. Check power and BUSY wiring.");
+                break;
             }
         }
         if (busyState != LOW) {
@@ -244,20 +238,11 @@ public:
         LOGV("[EPD] BUSY pin initial state: %d\n", digitalRead(EPD_BUSY));
         LOGV("[EPD] RST pin initial state: %d\n", digitalRead(EPD_RST));
 
-        if (digitalRead(EPD_BUSY) == LOW) {
-            LOGELN("[EPD] BUSY pin is LOW at startup. The panel may be holding the line or missing its pull-up. Display commands will pause until it releases.");
-        }
-
         LOGVLN("[EPD] Attaching HSPI bus for display communication (4MHz)");
         epdSPI.begin(EPD_SCK, -1, EPD_MOSI, -1);
         epdSPI.setFrequency(4000000); // 4MHz
 
         LOGILN("[EPD] Display interface ready. Expect BUSY pin to toggle during refresh operations.");
-        available = true;
-    }
-
-    bool isAvailable() const {
-        return available;
     }
 
     void reset() {
@@ -273,15 +258,10 @@ public:
         LOGVLN("[EPD] Hardware reset complete");
     }
 
-    bool initializeControllers() {
-        if (!available) {
-            LOGELN("[EPD] initializeControllers() skipped because the display is marked unavailable.");
-            return false;
-        }
-
+    void init() {
         LOGILN("[EPD] Initializing display controllers (expect the panel to clear and flash)");
         reset();
-        if (!waitForIdle("post-reset")) {
+        if (!waitUntilIdle("post-reset")) {
             return false;
         }
 
@@ -292,17 +272,11 @@ public:
         initializeIC(EPD_CS_S);
 
         LOGILN("[EPD] Display initialization complete");
-        return true;
     }
 
-    bool clearPanel() {
-        if (!available) {
-            LOGELN("[EPD] clearPanel() skipped because the display is marked unavailable.");
-            return false;
-        }
-
+    void clear() {
         LOGILN("[EPD] Clearing display to white. Expect a full screen flash.");
-
+        
         // Clear master area
         sendCommand(EPD_CS_M, 0x10); // Start transmission
         for(int i = 0; i < (EPD_HALF_WIDTH * EPD_HEIGHT) / 8; i++) {
@@ -315,55 +289,42 @@ public:
             sendData(EPD_CS_S, 0xFF);
         }
 
-        if (!refreshPanel()) {
+        if (!refresh()) {
             return false;
         }
         return true;
     }
 
-    bool refreshPanel() {
-        if (!available) {
-            LOGELN("[EPD] refreshPanel() skipped because the display is marked unavailable.");
-            return false;
-        }
-
+    void refresh() {
         LOGILN("[EPD] Triggering display refresh. Panel should update shortly.");
-
+        
         // Refresh both ICs
         sendCommand(EPD_CS_M, 0x04); // Power on
-        if (!waitForIdle("master power on")) {
+        if (!waitUntilIdle("master power on")) {
             return false;
         }
         sendCommand(EPD_CS_S, 0x04);
-        if (!waitForIdle("slave power on")) {
+        if (!waitUntilIdle("slave power on")) {
             return false;
         }
 
         sendCommand(EPD_CS_M, 0x12); // Display refresh
         sendCommand(EPD_CS_S, 0x12);
         delay(100);
-        if (!waitForIdle("display refresh")) {
-            return false;
-        }
-
+        waitUntilIdle();
+        
         LOGILN("[EPD] Display refresh complete");
-        return true;
     }
 
-    bool enterDeepSleep() {
-        if (!available) {
-            LOGELN("[EPD] enterDeepSleep() skipped because the display is marked unavailable.");
-            return false;
-        }
-
+    void sleep() {
         LOGILN("[EPD] Entering deep sleep to save power");
 
         sendCommand(EPD_CS_M, 0x02); // Power off
-        if (!waitForIdle("master power off")) {
+        if (!waitUntilIdle("master power off")) {
             return false;
         }
         sendCommand(EPD_CS_S, 0x02);
-        if (!waitForIdle("slave power off")) {
+        if (!waitUntilIdle("slave power off")) {
             return false;
         }
 
@@ -375,26 +336,17 @@ public:
         digitalWrite(EPD_PWR, LOW);
 
         LOGILN("[EPD] Display is now in deep sleep");
-        return true;
     }
 
-    bool renderBitmap(uint8_t* imageData, int dataSize) {
+    bool displayBitmap(uint8_t* imageData, int dataSize) {
         if(imageData == NULL || dataSize == 0) {
-            LOGELN("[EPD] Invalid image data passed to renderBitmap");
-            return false;
+            LOGELN("[EPD] Invalid image data passed to displayBitmap");
+            return;
         }
-
-        if (!available) {
-            LOGELN("[EPD] Skipping renderBitmap because the display is marked unavailable. Check previous error logs.");
-            return false;
-        }
-
+        
         LOGILN("[EPD] Displaying bitmap. Expect a two-stage refresh (left then right controller).");
-        if (!initializeControllers()) {
-            LOGELN("[EPD] renderBitmap aborted because initialization failed.");
-            return false;
-        }
-
+        init();
+        
         int halfDataSize = dataSize / 2;
 
         // Send to master area (left half)
@@ -415,41 +367,39 @@ public:
             }
         }
 
-        if (!refreshPanel()) {
+        if (!refresh()) {
             LOGELN("[EPD] Bitmap transfer complete but refresh failed. Display remains marked unavailable.");
             return false;
         }
-        if (!enterDeepSleep()) {
+        if (!sleep()) {
             return false;
         }
         return true;
     }
 
-    bool renderText(const char* text, int x, int y) {
+    bool displayText(const char* text, int x, int y) {
         // Simple text display for WiFi info
         // This is a simplified version - you'd want a proper font library
         if (!available) {
-            LOGELN("[EPD] renderText skipped because the display is marked unavailable.");
+            LOGELN("[EPD] displayText skipped because the display is marked unavailable.");
             return false;
         }
 
-        if (!initializeControllers()) {
-            LOGELN("[EPD] renderText aborted because initialization failed.");
+        if (!init()) {
+            LOGELN("[EPD] displayText aborted because initialization failed.");
             return false;
         }
-        if (!clearPanel()) {
-            LOGELN("[EPD] renderText aborted because clearing the display failed.");
+        if (!clear()) {
+            LOGELN("[EPD] displayText aborted because clearing the display failed.");
             return false;
         }
 
         // For now, just display something visible
         // In production, use GFX library with fonts
         LOGI("[EPD] Text placeholder -> '%s' at (%d,%d). Expect a future font renderer here.\n", text, x, y);
-
-        if (!enterDeepSleep()) {
-            return false;
-        }
-        return true;
+        
+        refresh();
+        sleep();
     }
 };
 
@@ -560,7 +510,7 @@ bool displayImageFromSD(String filename) {
 
     // Display image
     LOGVLN("[IMG] Sending buffered image to display controller");
-    bool renderSuccess = epd.renderBitmap(imageBuffer, fileSize);
+    epd.displayBitmap(imageBuffer, fileSize);
     free(imageBuffer);
 
     if(!renderSuccess) {
@@ -624,34 +574,20 @@ bool connectToWiFi(String ssid, String password, int timeout_s = 20) {
 }
 
 void displayAccessPointInstructions(const IPAddress& ip) {
-    String displayText = "Connect to WiFi:\n" + ssid_ap + "\nThen go to:\n" + ip.toString();
-
-    if (!epd.isAvailable()) {
-        LOGELN("[WIFI] Display unavailable. Provide these captive portal instructions to the user via serial/logs: " + displayText);
-        return;
-    }
-
     LOGVLN("[WIFI] Rendering Access Point instructions on e-paper display");
-    if (!epd.renderText(displayText.c_str(), 100, 400)) {
-        LOGELN("[WIFI] Failed to render Access Point instructions on the display. Check BUSY line and power rails.");
-        return;
-    }
+    epd.init();
+    epd.clear();
+    String displayText = "Connect to WiFi:\n" + ssid_ap + "\nThen go to:\n" + ip.toString();
+    epd.displayText(displayText.c_str(), 100, 400);
     LOGILN("[WIFI] Display updated with Access Point connection steps");
 }
 
 void displayStationConnectionInfo(const IPAddress& ip) {
-    String displayText = "Connected!\nUpload images to:\nhttp://" + ip.toString();
-
-    if (!epd.isAvailable()) {
-        LOGELN("[WIFI] Display unavailable. Provide station-mode instructions via serial/logs: " + displayText);
-        return;
-    }
-
     LOGVLN("[WIFI] Rendering station-mode status on e-paper display");
-    if (!epd.renderText(displayText.c_str(), 100, 400)) {
-        LOGELN("[WIFI] Failed to render station-mode status on the display. Check BUSY line and power rails.");
-        return;
-    }
+    epd.init();
+    epd.clear();
+    String displayText = "Connected!\nUpload images to:\nhttp://" + ip.toString();
+    epd.displayText(displayText.c_str(), 100, 400);
     LOGILN("[WIFI] Display updated with WiFi connection details");
 }
 
@@ -1029,9 +965,9 @@ void setup() {
     LOGILN("[SETUP] Initializing SD card");
     if(!initSDCard()) {
         LOGELN("[SETUP] SD Card required! Halting.");
-        if (!epd.renderText("ERROR: No SD Card", 100, 500)) {
-            LOGELN("[SETUP] Unable to render SD card error on the display. Check BUSY pin state and cabling.");
-        }
+        epd.init();
+        epd.clear();
+        epd.displayText("ERROR: No SD Card", 100, 500);
         while(1) delay(1000);
     }
 
@@ -1053,9 +989,10 @@ void setup() {
     // If we have a saved image and WiFi is working, display it
     if(current_image.length() > 0 && wifi_configured) {
         LOGILN("[SETUP] Displaying last selected image: " + current_image + ". Expect the panel to refresh shortly.");
-        if (!displayImageFromSD(current_image)) {
-            LOGELN("[SETUP] Failed to restore the previous image to the panel during boot.");
-        }
+        epd.init();
+        epd.clear();
+        delay(1000);
+        displayImageFromSD(current_image);
         last_refresh_time = millis();
     } else if(current_image.length() == 0) {
         LOGILN("[SETUP] No saved image to display at boot");
@@ -1083,9 +1020,10 @@ void loop() {
 
         if(currentTime - last_refresh_time >= REFRESH_INTERVAL) {
             LOGILN("[LOOP] Performing scheduled daily refresh of the display");
-            if (!displayImageFromSD(current_image)) {
-                LOGELN("[LOOP] Scheduled refresh failed. Display state unchanged.");
-            }
+            epd.init();
+            epd.clear();
+            delay(1000);
+            displayImageFromSD(current_image);
             last_refresh_time = currentTime;
         }
     }
