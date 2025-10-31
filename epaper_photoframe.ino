@@ -153,6 +153,8 @@ void setLogLevel(LogLevel level, bool persist = false) {
 
 class EPaperDisplay {
 private:
+    bool available = true;
+
     void spiTransfer(uint8_t data) {
         epdSPI.transfer(data);
     }
@@ -194,6 +196,7 @@ private:
             LOGV("[EPD] BUSY pin released after %lu ms. Continuing.\n", millis() - startTime);
         }
         delay(200);
+        return true;
     }
 
     void initializeIC(uint8_t cs_pin) {
@@ -226,7 +229,7 @@ public:
         pinMode(EPD_CS_S, OUTPUT);
         pinMode(EPD_DC, OUTPUT);
         pinMode(EPD_RST, OUTPUT);
-        pinMode(EPD_BUSY, INPUT);
+        pinMode(EPD_BUSY, INPUT_PULLUP);
 
         digitalWrite(EPD_PWR, LOW);
         digitalWrite(EPD_CS_M, HIGH);
@@ -258,7 +261,9 @@ public:
     void init() {
         LOGILN("[EPD] Initializing display controllers (expect the panel to clear and flash)");
         reset();
-        waitUntilIdle();
+        if (!waitUntilIdle("post-reset")) {
+            return false;
+        }
 
         // Initialize both ICs
         LOGVLN("[EPD] Initializing master controller");
@@ -283,8 +288,11 @@ public:
         for(int i = 0; i < (EPD_HALF_WIDTH * EPD_HEIGHT) / 8; i++) {
             sendData(EPD_CS_S, 0xFF);
         }
-        
-        refresh();
+
+        if (!refresh()) {
+            return false;
+        }
+        return true;
     }
 
     void refresh() {
@@ -292,10 +300,14 @@ public:
         
         // Refresh both ICs
         sendCommand(EPD_CS_M, 0x04); // Power on
-        waitUntilIdle();
+        if (!waitUntilIdle("master power on")) {
+            return false;
+        }
         sendCommand(EPD_CS_S, 0x04);
-        waitUntilIdle();
-        
+        if (!waitUntilIdle("slave power on")) {
+            return false;
+        }
+
         sendCommand(EPD_CS_M, 0x12); // Display refresh
         sendCommand(EPD_CS_S, 0x12);
         delay(100);
@@ -308,9 +320,13 @@ public:
         LOGILN("[EPD] Entering deep sleep to save power");
 
         sendCommand(EPD_CS_M, 0x02); // Power off
-        waitUntilIdle();
+        if (!waitUntilIdle("master power off")) {
+            return false;
+        }
         sendCommand(EPD_CS_S, 0x02);
-        waitUntilIdle();
+        if (!waitUntilIdle("slave power off")) {
+            return false;
+        }
 
         sendCommand(EPD_CS_M, 0x07); // Deep sleep
         sendData(EPD_CS_M, 0xA5);
@@ -322,7 +338,7 @@ public:
         LOGILN("[EPD] Display is now in deep sleep");
     }
 
-    void displayBitmap(uint8_t* imageData, int dataSize) {
+    bool displayBitmap(uint8_t* imageData, int dataSize) {
         if(imageData == NULL || dataSize == 0) {
             LOGELN("[EPD] Invalid image data passed to displayBitmap");
             return;
@@ -332,7 +348,7 @@ public:
         init();
         
         int halfDataSize = dataSize / 2;
-        
+
         // Send to master area (left half)
         sendCommand(EPD_CS_M, 0x10);
         for(int i = 0; i < halfDataSize; i++) {
@@ -350,17 +366,34 @@ public:
                 LOGV("[EPD] Slave load progress: %d/%d bytes\n", i - halfDataSize, halfDataSize);
             }
         }
-        
-        refresh();
-        sleep();
+
+        if (!refresh()) {
+            LOGELN("[EPD] Bitmap transfer complete but refresh failed. Display remains marked unavailable.");
+            return false;
+        }
+        if (!sleep()) {
+            return false;
+        }
+        return true;
     }
 
-    void displayText(const char* text, int x, int y) {
+    bool displayText(const char* text, int x, int y) {
         // Simple text display for WiFi info
         // This is a simplified version - you'd want a proper font library
-        init();
-        clear();
-        
+        if (!available) {
+            LOGELN("[EPD] displayText skipped because the display is marked unavailable.");
+            return false;
+        }
+
+        if (!init()) {
+            LOGELN("[EPD] displayText aborted because initialization failed.");
+            return false;
+        }
+        if (!clear()) {
+            LOGELN("[EPD] displayText aborted because clearing the display failed.");
+            return false;
+        }
+
         // For now, just display something visible
         // In production, use GFX library with fonts
         LOGI("[EPD] Text placeholder -> '%s' at (%d,%d). Expect a future font renderer here.\n", text, x, y);
@@ -479,7 +512,12 @@ bool displayImageFromSD(String filename) {
     LOGVLN("[IMG] Sending buffered image to display controller");
     epd.displayBitmap(imageBuffer, fileSize);
     free(imageBuffer);
-    
+
+    if(!renderSuccess) {
+        LOGELN("[IMG] Display driver reported a failure while rendering the bitmap. Leaving current image unchanged.");
+        return false;
+    }
+
     // Save current image to preferences
     prefs.begin("photoframe", false);
     prefs.putString("current_img", filename);
